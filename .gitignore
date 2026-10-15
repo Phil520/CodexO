@@ -1,0 +1,11 @@
+# 构建产物：由 build.sh 现生成，不进版本库
+output/
+
+# macOS 杂项
+.DS_Store
+*.swp
+
+# 编辑器临时文件
+*~
+*.orig
+*.rej
