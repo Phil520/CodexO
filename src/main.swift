@@ -39,6 +39,41 @@ private let readingStamp: DateFormatter = {
     return formatter
 }()
 
+/// 单实例锁。文件本身当锁用：成功创建 → 是第一个；已存在 → 前面有人。
+private let singleInstanceLockURL = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexO.singleton.lock")
+
+/// 抢单实例锁。返回 false 表示已经有别的 CodexO 在跑。
+///
+/// 为什么用「创建文件」而不是文件锁（flock）：
+/// flock 要先 open 再 flock，还得管 fd 生命周期；这里只需要
+/// 「文件在 = 有人」，语义更直白，代价是**进程被强杀后锁文件会留下**。
+/// 所以启动时顺手做一次陈旧性检查（下面 `reclaimIfStale`）。
+private func acquireSingleInstanceLock() -> Bool {
+    let fm = FileManager.default
+
+    // 锁文件是本进程上次留下的 → 清掉重来。
+    // 不清的话，用户强杀进程（干净退出走不到这里）之后就再也起不来了，
+    // 那比"两个图标"更糟 —— 它会让 App 变成"装了但用不了"。
+    if fm.fileExists(atPath: singleInstanceLockURL.path) {
+        // 锁文件里写着 pid。进程还在就不是陈旧的，直接判定为"已有实例"。
+        if let text = try? String(contentsOf: singleInstanceLockURL, encoding: .utf8),
+           let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+           pid > 0, kill(pid, 0) == 0 {
+            return false
+        }
+        // pid 不在了（进程已死）→ 锁陈旧，删掉重来
+        try? fm.removeItem(at: singleInstanceLockURL)
+    }
+
+    guard fm.createFile(atPath: singleInstanceLockURL.path,
+                        contents: Data("\(ProcessInfo.processInfo.processIdentifier)".utf8)) else {
+        // 建不出来（权限等）就放行：宁可两个图标，也不要让 App 起不来
+        return true
+    }
+    return true
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var statusItem: NSStatusItem!
@@ -65,6 +100,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Diagnostics.markLaunch()
+
+        // 单实例保护：已经有别的 CodexO 在跑就直接退出。
+        //
+        // 2026-10-19 实测：发布验收时从 /tmp 启动了一个副本、忘了关，
+        // 菜单栏于是出现**两个一模一样的图标**。更麻烦的是两个进程写同一份日志，
+        // 行与行交错，下次排查时那份日志直接作废。
+        //
+        // 用户完全可以理解"多开一个"，所以不能指望人人都会先看菜单栏；
+        // 也不能指望每个开发者/脚本作者都会记得关进程。
+        // **单实例是这个 App 的产品要求，不是可选项** ——
+        // 两个图标会让人以为软件不稳定，而两个进程混写日志会让排查失效。
+        //
+        // 用锁文件而不是 NSApplication 的 canBecomeActive：
+        // 后者只在前台 App 之间生效，对 LSUIElement 这类后台 App 无效。
+        if !acquireSingleInstanceLock() {
+            Diagnostics.appendRaw("[\(Diagnostics.logStamp)] 检测到已有实例在跑，本次启动放弃\n")
+            NSApp.terminate(nil)
+            return
+        }
+
         NSApp.setActivationPolicy(.accessory)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -352,6 +407,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    /// 正常退出时清掉单实例锁。
+    /// 强杀（pkill / 崩溃）走不到这里，但 `acquireSingleInstanceLock()`
+    /// 里那条「锁文件里的 pid 还活着吗」能兜住那种情况，不会把 App 卡死。
+    func applicationWillTerminate(_ notification: Notification) {
+        try? FileManager.default.removeItem(at: singleInstanceLockURL)
     }
 
     // MARK: - 开机自启动
