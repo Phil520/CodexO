@@ -60,3 +60,73 @@ codesign -dv "$TARGET_APP" 2>&1 | head -3
 
 echo "==> 完成：$TARGET_APP"
 du -sh "$TARGET_APP"
+
+# ---------------------------------------------------------------------------
+# 回归测试（默认跑，可用 SKIP_TESTS=1 跳过）
+#
+# 为什么把测试挂进 build.sh 而不是留成手动步骤：
+# 上一轮「手动刷新被缓存吞掉」和本轮「副本误删锁」两个 bug，
+# 共同点是**肉眼与单进程启动都看不出来**，只有专门判据能测出来。
+# 测试不挂在构建路径上，就等于没有下一次修复的保障。
+#
+# 四条回归：
+#   1. 按事件时间戳取新文件读数  2. 尾部字节切在汉字中间仍可读
+#   3. 手动刷新绕过缓存          4. 单实例锁不被副本误删（起真实子进程）
+# ---------------------------------------------------------------------------
+if [ "${SKIP_TESTS:-0}" = "1" ]; then
+  echo "==> 跳过回归测试（SKIP_TESTS=1）"
+  exit 0
+fi
+
+TEST_TMP="$(mktemp -d /tmp/codexo_tests.XXXXXX)"
+echo "==> 跑回归测试"
+
+# 铁律：测试里凡是起 App 进程的，跑之前先把残留清干净。
+# 不清的话，测试会以"已有实例在跑"为由直接作废，
+# 而作废是静默的——你会以为测试通过了。
+pkill -f CodexUsageMenuBar 2>/dev/null && echo "    已清理残留进程" || true
+sleep 1
+rm -f "$TMPDIR/CodexO.singleton.lock" 2>/dev/null || true
+
+# 单实例测试文件名必须是 main.swift：Swift 只允许名为 main.swift 的文件写顶层语句。
+cp "$PROJECT_DIR/tests/moon_geometry.swift" "$TEST_TMP/main.swift"
+
+echo "  [1/3] 月相几何（七档面积）"
+swiftc -swift-version 5 -framework Cocoa -o "$TEST_TMP/moon" \
+  "$TEST_TMP/main.swift" \
+  "$PROJECT_DIR/src/MenuBarUI.swift" \
+  "$PROJECT_DIR/src/UsageReader.swift" 2>&1 | grep -E "error" && { echo "    编译失败"; exit 1; }
+"$TEST_TMP/moon" | tail -3
+
+echo "  [2/3] 取数与缓存"
+swiftc -swift-version 5 -framework Cocoa -o "$TEST_TMP/reader" \
+  "$PROJECT_DIR/tests/main.swift" \
+  "$PROJECT_DIR/src/UsageReader.swift" \
+  "$PROJECT_DIR/src/MenuBarUI.swift" 2>&1 | grep -E "error" && { echo "    编译失败"; exit 1; }
+"$TEST_TMP/reader" | grep -E "^(✅|❌)"
+
+echo "  [3/3] 单实例锁（起真实子进程）"
+swiftc -swift-version 5 -framework Cocoa -D CODEXO_SINGLE_INSTANCE_TESTS \
+  -o "$TEST_TMP/si" \
+  "$PROJECT_DIR/tests/main.swift" \
+  "$PROJECT_DIR/tests/single_instance.swift" \
+  "$PROJECT_DIR/src/UsageReader.swift" \
+  "$PROJECT_DIR/src/MenuBarUI.swift" 2>&1 | grep -E "error" && { echo "    编译失败"; exit 1; }
+CODEXO_BINARY="$TARGET_APP/Contents/MacOS/CodexUsageMenuBar" "$TEST_TMP/si" \
+  | sed -n '/单实例锁回归测试/,$p'
+
+# 收尾铁律：先杀进程、确认干净，再删目录。
+# 顺序反了会留下孤儿进程——菜单栏于是出现两个图标（本项目 2026-10-19 踩过）。
+pkill -f CodexUsageMenuBar 2>/dev/null || true
+sleep 1
+REMAINING="$(pgrep -f CodexUsageMenuBar | wc -l | tr -d ' ')"
+if [ "$REMAINING" != "0" ]; then
+  echo "    ⚠️ 仍有 $REMAINING 个残留进程，强制清理"
+  pkill -9 -f CodexUsageMenuBar 2>/dev/null || true
+  sleep 1
+fi
+echo "    残留进程 $REMAINING 个"
+rm -rf "$TEST_TMP"
+rm -f "$TMPDIR/CodexO.singleton.lock" 2>/dev/null || true
+
+echo "==> 全部回归通过"
