@@ -326,7 +326,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - 菜单动作
 
     @objc private func doRefresh() {
+        // 必须先丢缓存再取数。缓存 key 只看「mtime 最新那个文件」，
+        // 而 Codex 刚新建会话时那个文件还没写出第一条额度数据，
+        // key 与上次相同 → 缓存命中 → 拿两天前的读数糊弄用户。
+        // 手动点刷新是用户在说「我怀疑你错了，去看看」，不能被缓存拦下。
+        UsageReader.invalidateCache()
         reload()
+        // 点完之后菜单是收起的，用户看不到界面变了，得在日志里明确留痕。
+        // 不留痕的话，用户只会盯着那个"没动"的数字，以为他点的刷新没用。
+        Diagnostics.appendRaw("[\(Diagnostics.logStamp)] 手动刷新已执行（已清缓存）\n")
     }
 
     @objc private func openSessions() {
