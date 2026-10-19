@@ -410,10 +410,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// 正常退出时清掉单实例锁。
-    /// 强杀（pkill / 崩溃）走不到这里，但 `acquireSingleInstanceLock()`
-    /// 里那条「锁文件里的 pid 还活着吗」能兜住那种情况，不会把 App 卡死。
+    ///
+    /// ⚠️ 这里**只能删「锁文件里写的是自己 pid」的那把锁**，不能无条件删。
+    /// 2026-10-19 11:31 实测出的真bug：
+    /// 副本被`acquireSingleInstanceLock()` 拦下后会走 `NSApp.terminate`，
+    /// 于是 `applicationWillTerminate` 照样执行、把**正式实例持有的锁一起删了**。
+    /// 结果是第三个进程畅通无阻 —— 菜单栏再次出现两个图标，
+    /// 也就是上一轮修掉的那个问题又原样复发了一次。
+    ///
+    /// 判「锁是不是自己的」不靠内存里的标志位（标志位可能与实际状态不符），
+    /// 而是回头读锁文件里的 pid 对账：只有那个 pid == 自己才动它。
+    /// 副本、僵尸实例、pid 复用的情形全都自动安全。
     func applicationWillTerminate(_ notification: Notification) {
-        try? FileManager.default.removeItem(at: singleInstanceLockURL)
+        let fm = FileManager.default
+        guard let text = try? String(contentsOf: singleInstanceLockURL, encoding: .utf8),
+              let owner = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              owner == ProcessInfo.processInfo.processIdentifier else {
+            // 锁不属于自己（或锁已经没了）→ 一个字节都不碰。
+            return
+        }
+        try? fm.removeItem(at: singleInstanceLockURL)
     }
 
     // MARK: - 开机自启动
