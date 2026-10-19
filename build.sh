@@ -86,7 +86,12 @@ echo "==> 跑回归测试"
 # 而作废是静默的——你会以为测试通过了。
 pkill -f CodexUsageMenuBar 2>/dev/null && echo "    已清理残留进程" || true
 sleep 1
-rm -f "$TMPDIR/CodexO.singleton.lock" 2>/dev/null || true
+# ⚠️ 必须用 ${TMPDIR:-/tmp}，不能写死 /tmp。
+# NSTemporaryDirectory() 在 macOS 上返回的是 $TMPDIR（形如
+# /var/folders/hp/xxxxxx/T/），不是 /tmp。
+# 2026-10-19 实测踩过：清理时 rm -f /tmp/CodexO.singleton.lock
+# 报"No such file"，一度以为锁没建起来 —— 实际它在 $TMPDIR 里好好待着。
+rm -f "${TMPDIR:-/tmp}CodexO.singleton.lock" 2>/dev/null || true
 
 # 单实例测试文件名必须是 main.swift：Swift 只允许名为 main.swift 的文件写顶层语句。
 cp "$PROJECT_DIR/tests/moon_geometry.swift" "$TEST_TMP/main.swift"
@@ -127,6 +132,11 @@ if [ "$REMAINING" != "0" ]; then
 fi
 echo "    残留进程 $REMAINING 个"
 rm -rf "$TEST_TMP"
-rm -f "$TMPDIR/CodexO.singleton.lock" 2>/dev/null || true
+# ⚠️ 必须用 ${TMPDIR:-/tmp}，不能写死 /tmp。
+# NSTemporaryDirectory() 在 macOS 上返回的是 $TMPDIR（形如
+# /var/folders/hp/xxxxxx/T/），不是 /tmp。
+# 2026-10-19 实测踩过：清理时 rm -f /tmp/CodexO.singleton.lock
+# 报"No such file"，一度以为锁没建起来 —— 实际它在 $TMPDIR 里好好待着。
+rm -f "${TMPDIR:-/tmp}CodexO.singleton.lock" 2>/dev/null || true
 
 echo "==> 全部回归通过"
