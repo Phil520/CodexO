@@ -36,9 +36,25 @@ enum Diagnostics {
         return lines
     }
 
+    /// 每行都带 pid。
+    ///
+    /// 加它的直接原因：2026-10-19 发布后菜单栏出现了**两个**图标 ——
+    /// 验收时从 /tmp 启动的测试副本没关就删了目录，进程成了孤儿。
+    /// 而两个进程写的是**同一个日志文件**，行与行交错、看不出是谁写的。
+    /// 那次日志等于作废，而"日志不可信"是排查里最致命的前提失效。
+    ///
+    /// 记 pid 之后，多实例一眼可辨：
+    /// `grep '刷新' 日志 | awk '{print $3}' | sort | uniq -c` 出现两个 pid 就说明重了。
+    ///
+    /// 教训不只是"记得关进程"，还有：**一旦多个进程会写同一份日志，
+    /// 日志就必须自带身份**。共享的日志没有署名，等于没有日志。
+    private static var logPrefix: String {
+        "\(stamp.string(from: Date())) pid\(ProcessInfo.processInfo.processIdentifier)"
+    }
+
     /// 只记一行内存，用于长期观察「跑几天会不会涨」
     static func recordMemory(tag: String) {
-        appendRaw("[\(stamp.string(from: Date()))] 内存 \(tag)：\(Memory.summary())\n")
+        appendRaw("[\(logPrefix)] 内存 \(tag)：\(Memory.summary())\n")
     }
 
     // MARK: - 刷新循环自检
@@ -54,7 +70,7 @@ enum Diagnostics {
     /// 供调用方在自检之外自己打异常行时对齐序号与时间戳，
     /// 免得出现「刷新 #41」之后又冒出「刷新 #40」这种看起来错乱的日志。
     static var refreshIndex: Int { refreshCount + 1 }
-    static var logStamp: String { stamp.string(from: Date()) }
+    static var logStamp: String { logPrefix }
 
     /// 心跳间隔（秒）。读数没变时也定期记一行，用来证明循环还活着。
     private static let beatInterval: TimeInterval = 15 * 60
@@ -81,7 +97,7 @@ enum Diagnostics {
         let source = snapshot.sourceFile.map { String($0.prefix(26)) } ?? "—"
 
         appendRaw(String(format: "[%@] 刷新 #%d %@ 5H=%@ W=%@ 界面=%@ 读数=%@（%@前）取数=%.3fs 来源=%@\n",
-                         stamp.string(from: now),
+                         logPrefix,
                          refreshCount,
                          changed ? "变化" : "心跳",
                          five < 0 ? "无" : "\(five)%",
@@ -99,7 +115,7 @@ enum Diagnostics {
     static func record(statusItem: NSStatusItem?, snapshot: UsageSnapshot?, menu: NSMenu? = nil) {
         var lines: [String] = []
 
-        lines.append("──── 诊断 \(stamp.string(from: Date())) ────")
+        lines.append("──── 诊断 \(stamp.string(from: Date()))  pid\(ProcessInfo.processInfo.processIdentifier) ────")
         lines.append("app        : \(Bundle.main.bundlePath)")
         lines.append("pid        : \(ProcessInfo.processInfo.processIdentifier)")
         lines.append("策略       : \(NSApp.activationPolicy().rawValue)（0=regular, 1=accessory, 2=prohibited）")
