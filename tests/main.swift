@@ -394,3 +394,21 @@ do {
     UsageReader.invalidateCache()
 }
 
+
+// 回归四：单实例锁不能被「被拦下的副本」误删。
+// 2026-10-19 11:31 实测出的真bug：副本被拦下后退出时，
+// applicationWillTerminate 无条件删锁，把正式实例的锁一起删了，
+// 于是第三个进程畅通无阻 —— 上一轮修掉的「两个图标」原样复发。
+// ⚠️ 必须用 #if 把这段圈起来，不能只靠环境变量判空。
+// `runSingleInstanceTest` 定义在 tests/single_instance.swift 里，
+// 而那个文件只在跑单实例测试时才一起编译；不圈起来的话，
+// 单独编译本文件（跑取数回归）会因为找不到符号而编译失败。
+// 环境变量只决定"跑不跑"，#if 决定"这段代码存不存在"。
+#if CODEXO_SINGLE_INSTANCE_TESTS
+if ProcessInfo.processInfo.environment["CODEXO_BINARY"] != nil {
+    runSingleInstanceTest()
+    if failures > 0 {
+        print("\n════ 单实例锁测试失败 \(failures) 项 ════")
+    }
+}
+#endif
