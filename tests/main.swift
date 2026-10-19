@@ -319,3 +319,78 @@ do {
     UsageReader.sessionRoot = ("~/.codex/sessions" as NSString).expandingTildeInPath
 }
 
+// MARK: - 回归三：手动刷新必须能绕过缓存
+
+do {
+    line("回归：手动刷新必须绕过缓存（2026-10-19 现场）")
+
+    let root = "/tmp/codexo-manual-refresh-fixture"
+    try? FileManager.default.removeItem(atPath: root)
+
+    let nowEvent = Date()
+    let twoDaysAgo = nowEvent.addingTimeInterval(-2 * 86_400)
+
+    // 旧会话：两天前的读数，5H 已用 16% → 剩 84%
+    try writeSessionAt(root, "2026/10/14/old-session.jsonl",
+                       used: 16, resetsIn: 4 * 3_600, eventAt: twoDaysAgo)
+
+    // 新会话：刚创建，**里面没有任何额度事件**
+    // 复刻现场：新会话文件已存在、mtime 已是最新，但第一条带 rate_limits 的
+    // 事件要等第一次请求之后才落盘。
+    let newURL = URL(fileURLWithPath: root).appendingPathComponent("2026/10/19/new-session.jsonl")
+    let newPath = newURL.path
+    try FileManager.default.createDirectory(at: newURL.deletingLastPathComponent(),
+                                            withIntermediateDirectories: true)
+    let stamp = ISO8601DateFormatter()
+    stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let bareLine = "{\"timestamp\":\"\(stamp.string(from: nowEvent))\","
+                 + "\"payload\":{\"type\":\"token_count\","
+                 + "\"info\":{\"total_token_usage\":{\"total_tokens\":35760}}}}\n"
+    try bareLine.write(toFile: newPath, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.modificationDate: nowEvent], ofItemAtPath: newPath)
+
+    UsageReader.sessionRoot = root
+    UsageReader.invalidateCache()
+
+    let first = UsageReader.load()
+    print("① 新会话还没有额度事件时，5H 剩余 \(Format.percent(first.fiveHour?.remaining ?? -1))"
+          + "（只能来自 old-session）")
+
+    // 给新会话补上额度事件：5H 已用 3% → 剩 97%
+    let resetEpoch = Int(nowEvent.addingTimeInterval(4 * 3_600).timeIntervalSince1970)
+    let eventAt = nowEvent.addingTimeInterval(60)
+    let stamped = ISO8601DateFormatter()
+    stamped.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let withRate = bareLine
+        + "{\"timestamp\":\"\(stamped.string(from: eventAt))\",\"payload\":{\"type\":\"token_count\","
+        + "\"info\":{\"total_token_usage\":{\"total_tokens\":35760}},"
+        + "\"rate_limits\":{\"primary\":{\"used_percent\":3.0,\"window_minutes\":300,"
+        + "\"resets_at\":\(resetEpoch)},"
+        + "\"secondary\":{\"used_percent\":2.0,\"window_minutes\":10000,"
+        + "\"resets_at\":\(resetEpoch + 600_000)}}}}\n"
+    try withRate.write(toFile: newPath, atomically: true, encoding: .utf8)
+
+    // ⚠️ 把 mtime 强行改回原值 —— 模拟「缓存 key 没变」
+    // 这一步是本测试能成立的全部前提：只要 mtime 变了，任何实现靠重扫就能过，
+    // 根本测不出「缓存把用户的刷新吞了」这件事。
+    try FileManager.default.setAttributes([.modificationDate: nowEvent], ofItemAtPath: newPath)
+    print("② 已补上额度事件，并把 mtime 改回原值（缓存 key 不变）")
+
+    // 模拟用户点「立即刷新」：现在 doRefresh() 会先 invalidateCache()
+    UsageReader.invalidateCache()
+    let second = UsageReader.load()
+
+    let remaining = second.fiveHour?.remaining ?? -1
+    let pickedNew = abs(remaining - 97) < 0.01
+        && ((second.sourceFile?.contains("new-session")) ?? false)
+    print("③ 手动刷新后 5H 剩余 \(Format.percent(remaining))，来源 \(second.sourceFile ?? "—")")
+
+    print(pickedNew
+          ? "✅ 通过：手动刷新绕过缓存，读到新会话的 97%（不刷新会一直停在 84%）"
+          : "❌ 失败：手动刷新被缓存吞掉，仍返回两天前的读数")
+
+    try? FileManager.default.removeItem(atPath: root)
+    UsageReader.sessionRoot = ("~/.codex/sessions" as NSString).expandingTildeInPath
+    UsageReader.invalidateCache()
+}
+
