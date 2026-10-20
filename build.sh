@@ -69,9 +69,9 @@ du -sh "$TARGET_APP"
 # 共同点是**肉眼与单进程启动都看不出来**，只有专门判据能测出来。
 # 测试不挂在构建路径上，就等于没有下一次修复的保障。
 #
-# 四条回归：
-#   1. 按事件时间戳取新文件读数  2. 尾部字节切在汉字中间仍可读
-#   3. 手动刷新绕过缓存          4. 单实例锁不被副本误删（起真实子进程）
+# 五条回归：
+#   1. 月相档位设计   2. 月相渲染几何   3. 按事件时间戳取新文件读数
+#   4. 尾部字节切在汉字中间仍可读  5. 手动刷新绕过缓存  6. 单实例锁不被副本误删
 # ---------------------------------------------------------------------------
 if [ "${SKIP_TESTS:-0}" = "1" ]; then
   echo "==> 跳过回归测试（SKIP_TESTS=1）"
@@ -93,30 +93,76 @@ sleep 1
 # 报"No such file"，一度以为锁没建起来 —— 实际它在 $TMPDIR 里好好待着。
 rm -f "${TMPDIR:-/tmp}CodexO.singleton.lock" 2>/dev/null || true
 
-# 单实例测试文件名必须是 main.swift：Swift 只允许名为 main.swift 的文件写顶层语句。
-cp "$PROJECT_DIR/tests/moon_geometry.swift" "$TEST_TMP/main.swift"
+# ⚠️ 每个测试文件都必须**单独 cp 成main.swift**。
+# Swift 只允许名为 main.swift 的文件写顶层语句，所以文件名不能改。
+# 但共用同一个目标文件会出事：我先前把 moon_geometry 先 cp 成 main.swift，
+# 紧接着又 cp moon_levels 覆盖同一个 main.swift —— 于是"月相几何"那一步
+# 实际编译并运行的是 moon_levels，而它只打印 3 行结论，看着一切正常。
+# 这种错不报错、也不失败，只是**测的东西悄悄换了人**。
+# 解法：每个测试用独立的子目录，各自 main.swift。
+#
+# ⚠️ 源目录与输出二进制也要分开：先前二进制叫 levels、源目录也叫 levels，
+# 链接阶段直接报 "link command failed"，且脚本里那句 `&& { echo 编译失败; }`
+# 没接住（管道的退出码是 grep 的，不是 swiftc 的），
+# 于是错误一路滑到下一行才炸成 "levels: is a directory"。
+MOON_LEVELS_SRC="$TEST_TMP/levels_src"
+MOON_GEOM_SRC="$TEST_TMP/geom_src"
+mkdir -p "$MOON_LEVELS_SRC" "$MOON_GEOM_SRC"
+cp "$PROJECT_DIR/tests/moon_levels.swift" "$MOON_LEVELS_SRC/main.swift"
+cp "$PROJECT_DIR/tests/moon_geometry.swift" "$MOON_GEOM_SRC/main.swift"
 
-echo "  [1/3] 月相几何（七档面积）"
-swiftc -swift-version 5 -framework Cocoa -o "$TEST_TMP/moon" \
-  "$TEST_TMP/main.swift" \
+echo "  [1/4] 月相档位设计（面积单调 + 相邻差 + 胖瘦）"
+swiftc -swift-version 5 -framework Cocoa -o "$TEST_TMP/levels" \
+  "$MOON_LEVELS_SRC/main.swift" \
   "$PROJECT_DIR/src/MenuBarUI.swift" \
-  "$PROJECT_DIR/src/UsageReader.swift" 2>&1 | grep -E "error" && { echo "    编译失败"; exit 1; }
+  "$PROJECT_DIR/src/UsageReader.swift"
+> "$TEST_TMP/build.log" 2>&1
+  if [ $? -ne 0 ]; then
+    echo "    编译失败，完整输出："
+    sed "s/^/      /" "$TEST_TMP/build.log"
+    exit 1
+  fi
+"$TEST_TMP/levels" | tail -3
+
+echo "  [2/4] 月相几何（渲染出来的是不是这个形状）"
+swiftc -swift-version 5 -framework Cocoa -o "$TEST_TMP/moon" \
+  "$MOON_GEOM_SRC/main.swift" \
+  "$PROJECT_DIR/src/MenuBarUI.swift" \
+  "$PROJECT_DIR/src/UsageReader.swift"
+> "$TEST_TMP/build.log" 2>&1
+  if [ $? -ne 0 ]; then
+    echo "    编译失败，完整输出："
+    sed "s/^/      /" "$TEST_TMP/build.log"
+    exit 1
+  fi
 "$TEST_TMP/moon" | tail -3
 
-echo "  [2/3] 取数与缓存"
+echo "  [3/4] 取数与缓存"
 swiftc -swift-version 5 -framework Cocoa -o "$TEST_TMP/reader" \
   "$PROJECT_DIR/tests/main.swift" \
   "$PROJECT_DIR/src/UsageReader.swift" \
-  "$PROJECT_DIR/src/MenuBarUI.swift" 2>&1 | grep -E "error" && { echo "    编译失败"; exit 1; }
+  "$PROJECT_DIR/src/MenuBarUI.swift"
+> "$TEST_TMP/build.log" 2>&1
+  if [ $? -ne 0 ]; then
+    echo "    编译失败，完整输出："
+    sed "s/^/      /" "$TEST_TMP/build.log"
+    exit 1
+  fi
 "$TEST_TMP/reader" | grep -E "^(✅|❌)"
 
-echo "  [3/3] 单实例锁（起真实子进程）"
+echo "  [4/4] 单实例锁（起真实子进程）"
 swiftc -swift-version 5 -framework Cocoa -D CODEXO_SINGLE_INSTANCE_TESTS \
   -o "$TEST_TMP/si" \
   "$PROJECT_DIR/tests/main.swift" \
   "$PROJECT_DIR/tests/single_instance.swift" \
   "$PROJECT_DIR/src/UsageReader.swift" \
-  "$PROJECT_DIR/src/MenuBarUI.swift" 2>&1 | grep -E "error" && { echo "    编译失败"; exit 1; }
+  "$PROJECT_DIR/src/MenuBarUI.swift"
+> "$TEST_TMP/build.log" 2>&1
+  if [ $? -ne 0 ]; then
+    echo "    编译失败，完整输出："
+    sed "s/^/      /" "$TEST_TMP/build.log"
+    exit 1
+  fi
 CODEXO_BINARY="$TARGET_APP/Contents/MacOS/CodexUsageMenuBar" "$TEST_TMP/si" \
   | sed -n '/单实例锁回归测试/,$p'
 
