@@ -43,7 +43,18 @@ enum Palette {
     static let moonDarkColor = NSColor(calibratedWhite: 0.5, alpha: 0.38)
 
     /// 七个可辨识档位对应的余量代表值（%），从新月到满月递增
-    static let moonLevelValues: [Double] = [10, 30, 40, 50, 60, 80, 100]
+    ///
+    /// ⚠️ 这些数字不是"余量"，而是**月相亮面的目标形状**。
+    /// 用户看到的余量数值在图标左侧单独显示，这里的值只决定月亮长什么样。
+    /// 所以它们的含义是「phase」，不是「百分比余量」——
+    /// 但为了直观沿用 0...100 的写法，与 phase 等价。
+    ///
+    /// 2026-10-20 调整 [10,30,40,50,60,80,100] → [10,28,40,50,62,76,100]：
+    /// 原序列最刺眼的问题是**档6 与档7 几乎画成同一个形状**
+    /// （面积 90.45% vs 100%，只差 9.55%），肉眼看不出区别，
+    /// 于是"余量 90%" 和 "余量 100%" 在图标上是同一个月亮。
+    /// 新序列把最小相邻面积差拉到 13 个百分点。
+    static let moonLevelValues: [Double] = [10, 28, 40, 50, 62, 76, 100]
 
     /// 相邻档位的分界，取中点：20 / 35 / 45 / 55 / 70 / 90
     private static let moonThresholds: [Double] = [20, 35, 45, 55, 70, 90]
@@ -53,7 +64,7 @@ enum Palette {
     /// 七档的月相名，与「亮面被照亮的比例」一一对应。
     /// 全部取**上弦（盈）方向**的称谓：亮面在右侧、逐渐变胖，
     /// 与图标里"月亮从右边开始被点亮"的画法一致（北方上弦月正是右边亮）。
-    private static let moonNames = ["眉月", "蛾眉月", "渐盈月", "上弦月", "渐凸月", "盈凸月", "满月"]
+    static let moonNames = ["眉月", "蛾眉月", "渐盈月", "上弦月", "渐凸月", "盈凸月", "满月"]
 
     /// 每周余量 → 1...7 档。余量 0 落在最低档（最细的月牙），而不是不画。
     static func moonLevel(forRemaining remaining: Double) -> Int {
@@ -72,16 +83,58 @@ enum Palette {
         moonNames[moonLevel(forRemaining: remaining) - 1]
     }
 
+    // MARK: - 按档位取值的入口（1...7）
+    //
+    // 为什么把这两个单独开出来，而不是让调用方自己写
+    // `moonLevelValues[level - 1] / 100`：
+    // 「档位 → 代表值」这个映射规则只该有一处定义。
+    // 测试与目视工具若自己重算一遍，就等于用副本验证副本 ——
+    // 一旦两边一起错，判据照样全绿。
+    //
+    // （2026-10-20 加。起因是排查"月相不准"时需要按档逐个渲染，
+    //  结果发现测试里根本没有"按档取值"的入口可用。）
+
+    /// 第几档（1...7）对应的月相亮度比例
+    static func moonPhaseForLevel(_ level: Int) -> Double {
+        guard level >= 1, level <= moonLevelValues.count else { return 0 }
+        return moonLevelValues[level - 1] / 100
+    }
+
+    /// 第几档（1...7）对应的月相名
+    static func moonNameForLevel(_ level: Int) -> String {
+        guard level >= 1, level <= moonNames.count else { return moonNames[0] }
+        return moonNames[level - 1]
+    }
+
+    /// 第几档（1...7）覆盖的余量区间，用于菜单里说明档位含义。
+    /// 返回 (下界, 上界)，上界 100 表示无上界。
+    static func moonRangeForLevel(_ level: Int) -> (Double, Double) {
+        guard level >= 1, level <= moonLevelValues.count else { return (0, 0) }
+        let low = level == 1 ? 0 : moonThresholds[level - 2]
+        let high = level < moonThresholds.count ? moonThresholds[level - 1] : 100
+        return (low, high)
+    }
+
     /// 明暗交界线的横向半径系数（单位为月相圆半径 r）。
     ///
     /// 天文上准确的算法是 r·cos(π·phase)：满月时交界线退到左边缘（整颗圆都亮），
     /// 半弦月时正好过圆心（一条直线），新月时贴回右边缘（整颗圆都暗）。
     ///
-    /// 但物理准确 ≠ 图标可读：phase = 0.1 时亮面最宽处只有 0.05r，
-    /// 在 18pt 的菜单栏图标上就是一根看不见的头发丝。所以给系数加一个上限 0.78，
+    /// 但物理准确 ≠ 图标可读：phase = 0.1 时天文亮面面积只有 2.45%，
+    /// 在 18pt 的菜单栏图标上约等于一根看不见的头发丝。所以给系数加一个上限，
     /// 让最低档也保有一道看得见的月牙 —— 读数工具的第一职责是「能读出来」，
     /// 不是「还原天象」。
-    static let moonTerminatorCeiling: Double = 0.78
+    ///
+    /// ⚠️ 2026-10-20 从 0.78 放宽到 0.90。
+    /// 原来 0.78 是拍脑袋定的，副作用是**最低档被夸大到 4.5 倍**：
+    /// 天文该是 2.45% 的细月牙，实际画成 11.00%（面积），
+    /// 跟档2（20.61%）的差距被压到 9.6%，两档看着差不多。
+    /// 0.90 对应面积 5.00%：18pt@2x 下约 24 像素，仍是清晰的月牙，
+    /// 而与档2 的差距拉到 13 个百分点，档位重新分得开。
+    ///
+    /// 这个上限只影响最低那一档 —— 档2 起cos(π·phase) 都 ≤ 0.588，
+    /// 远低于任何合理上限。
+    static let moonTerminatorCeiling: Double = 0.90
 
     static func moonTerminatorRatio(forPhase phase: Double) -> CGFloat {
         let clamped = max(0, min(1, phase))
