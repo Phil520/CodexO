@@ -100,7 +100,7 @@ func runSingleInstanceTest() {
     let lockStillThere = FileManager.default.fileExists(atPath: lockPath)
     var lockOwner = "（读不到）"
     if lockStillThere,
-       let text = try? String(contentsOfFile: lockPath) {
+       let text = try? String(contentsOfFile: lockPath, encoding: .utf8) {
         lockOwner = text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     check(lockStillThere,
