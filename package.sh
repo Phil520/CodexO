@@ -89,18 +89,38 @@ if [ "$V" != "$VERSION" ]; then
 fi
 
 echo "==> 实跑解压出来的这一份（验完立刻收尾，不留孤儿进程）"
+#
+# ⚠️ 不能直接跑 $VAPP，也不能按 "CodexUsageMenuBar" 泛名 pgrep/pkill。
+#
+# 这个 App 要求单实例，锁文件在 $TMPDIR 下用户级共享。
+# 直接跑解压出来的那一份时：
+#   · 如果用户正开着 CodexO，它抢不到锁，立刻退出 → 被误判成「起来了但立刻退出」
+#   · pgrep 泛名会把用户那个进程一起数进去 → 进程数 2 → 被误判成单实例失效
+#   · 收尾 pkill -9 泛名会**把用户正在用的 App 一起杀掉**
+#
+# 而且这些都是「反复启停同一个 bundle id」，正是状态栏图标消失的诱因。
+# 所以这里复制一份、换时间戳 id、换独立锁，只操作自己这一份。
+RUN_APP="$VERIFY_DIR/CodexO-RunTest.app"
+ditto "$VAPP" "$RUN_APP"
+/usr/bin/plutil -replace CFBundleIdentifier \
+  -string "com.bean.codexo.pkgtest$(date +%s)" \
+  "$RUN_APP/Contents/Info.plist"
+RUN_LOCK="${TMPDIR:-/tmp}/CodexO.singleton.pkgtest-$$.lock"
+rm -f "$RUN_LOCK" 2>/dev/null || true
+echo "    实跑对象：临时副本（独立 id + 独立锁），不影响正在运行的 CodexO"
+
 # 用 setsid 式脱离 + 关掉 job control 提示：
 # 单纯 `cmd &` 在脚本被 kill 时会打印 "Terminated: 15" 噪音，
 # 那只是 shell 在报作业被杀，不是错误 —— 但验收日志里出现这种行会误导人。
 set +m
-"$VAPP/Contents/MacOS/CodexUsageMenuBar" >/dev/null 2>&1 &
+CODEXO_LOCK_PATH="$RUN_LOCK" "$RUN_APP/Contents/MacOS/CodexUsageMenuBar" >/dev/null 2>&1 &
 TEST_PID=$!
 disown 2>/dev/null || true
 set -m
 sleep 4
 if kill -0 "$TEST_PID" 2>/dev/null; then
   echo "    起来了 ✅ pid=$TEST_PID"
-  RUNNING="$(pgrep -f CodexUsageMenuBar | wc -l | tr -d ' ')"
+  RUNNING="$(pgrep -f "CodexO-RunTest.app" | wc -l | tr -d ' ')"
   echo "    当前 CodexO 进程数：$RUNNING"
   if [ "$RUNNING" != "1" ]; then
     echo "    ❌ 进程数不为 1，单实例保护可能有问题"
@@ -117,22 +137,24 @@ fi
 
 # 收尾铁律：先杀进程、确认干净，**然后**才删目录。
 # 顺序反了就会留下孤儿进程 —— 菜单栏于是出现两个图标（本项目踩过两次）。
+#
+# 全程只按副本路径匹配，绝不使用 "CodexUsageMenuBar" 这种泛名：
+# 用户自己的 CodexO 进程名是一样的，泛杀就会把人家正在用的图标搞没了。
 kill "$TEST_PID" 2>/dev/null || true
 sleep 2
 if kill -0 "$TEST_PID" 2>/dev/null; then
   kill -9 "$TEST_PID" 2>/dev/null || true
   sleep 1
 fi
-REMAIN="$(pgrep -f CodexUsageMenuBar | wc -l | tr -d ' ')"
-echo "    收尾后残留进程：$REMAIN"
-rm -f "${TMPDIR:-/tmp}/CodexO.singleton.lock" 2>/dev/null || true
+REMAIN="$(pgrep -f "CodexO-RunTest.app" 2>/dev/null | wc -l | tr -d ' ')"
+echo "    收尾后残留测试进程：$REMAIN"
+rm -f "$RUN_LOCK" 2>/dev/null || true
 
 if [ "$REMAIN" != "0" ]; then
-  pkill -9 -f CodexUsageMenuBar 2>/dev/null || true
+  pkill -9 -f "CodexO-RunTest.app" 2>/dev/null || true
   sleep 1
   echo "    已强制清理"
 fi
 rm -rf "$VERIFY_DIR"
-rm -f "${TMPDIR:-/tmp}/CodexO.singleton.lock" 2>/dev/null || true
 
 echo "==> 打包 + 验收全部通过：$ZIP"

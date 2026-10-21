@@ -1,7 +1,28 @@
 import Cocoa
 
 /// 开机自启动用的 LaunchAgent 标识
-private let launchAgentLabel = "com.bean.codex-usage-menubar"
+///
+/// ⚠️ 必须与 Info.plist 的 CFBundleIdentifier 完全一致（com.bean.codexo.menubar）。
+///
+/// 2026-10-21 排查「菜单栏看不见图标」的结论，实测得来：
+/// 一个 bundle id 一旦被系统记成「不可见」，清偏好、删 LaunchServices 注册、
+/// 重启控制中心全都无效，**只有换一个从未用过的 id 才能恢复**。
+///
+/// 症状极具迷惑性：进程活着、定时器在跑、日志正常写、App 自报 isVisible=true，
+/// 但菜单栏上就是没有图标；按钮窗口的 frame 会报成 (0, -22, 68, 22)
+/// —— 注意宽度还在、高度退化成 22，而正常项是 33（菜单栏满高 32 + 1pt 边框）。
+///
+/// 触发条件同前一条：**同一个 id 在很短时间内被反复启停**，
+/// 位置分配还没稳定就被打断，系统就记下了坏状态。
+///
+/// 真正的教训不在 App 里，而在构建脚本里：单实例锁回归测试要连开三个同 id 的
+/// 实例再全部杀掉 —— 每构建一次就把正式 App 的 id 弄坏一次。
+/// 所以 build.sh 里的这项测试已改成用**临时副本 + 独立 id**，不再碰正式 id。
+///
+/// App 侧的自救措施是 `ensureStatusItemPlacement()`：启动后复查位置，
+/// 不对就重建状态栏项让系统重新分配。它能救「偶发一次没排上」，
+/// 救不了「id 已被记死」—— 后者只能换 id。
+private let launchAgentLabel = "com.bean.codexo.menubar"
 
 /// 自动刷新间隔（秒）。
 /// 允许用环境变量覆盖，是为了把「跑几天」压缩成「跑几分钟」的真实进程压测：
@@ -40,8 +61,22 @@ private let readingStamp: DateFormatter = {
 }()
 
 /// 单实例锁。文件本身当锁用：成功创建 → 是第一个；已存在 → 前面有人。
-private let singleInstanceLockURL = URL(fileURLWithPath: NSTemporaryDirectory())
-    .appendingPathComponent("CodexO.singleton.lock")
+///
+/// 路径可用 `CODEXO_LOCK_PATH` 覆盖，只给回归测试用。
+///
+/// 为什么要留这个口子：锁默认放在 $TMPDIR，是**整个用户共享**的一个位置，
+/// 于是「跑单实例回归测试」和「用户正在用这个 App」天然冲突 ——
+/// 以前的做法是测试前 `pkill -f CodexUsageMenuBar` 把正式 App 杀掉，
+/// 用户桌面上正在用的图标会突然消失。测试隔离出自己的锁文件之后，
+/// 构建和用户使用可以同时进行，互不打扰。
+private let singleInstanceLockURL: URL = {
+    if let override = ProcessInfo.processInfo.environment["CODEXO_LOCK_PATH"],
+       !override.isEmpty {
+        return URL(fileURLWithPath: override)
+    }
+    return URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("CodexO.singleton.lock")
+}()
 
 /// 抢单实例锁。返回 false 表示已经有别的 CodexO 在跑。
 ///
@@ -122,17 +157,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         NSApp.setActivationPolicy(.accessory)
 
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            // 数值在左、图标在右。菜单栏控件从左往右排，靠右的位置更容易被别的图标挤掉，
-            // 把读数放在最左侧可以保证它始终第一个被看到。
-            button.imagePosition = .imageTrailing
-            button.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-            button.setAccessibilityLabel("Codex 用量")
-        }
+        createStatusItem()
 
         buildMenuOnce()
         reload()
+
+        // 位置自愈：菜单栏的位置分配不一定一次成功。
+        //
+        // 2026-10-21 踩出来的坑：macOS 26 会把「暂时放不下」的状态栏项
+        // 降级成紧凑高度（22pt）并塞到时钟底下，App 自己完全看不出异常
+        // （isVisible 仍报 true），但用户就是看不见图标。
+        // 判据是按钮窗口的 frame：正常是 y≈923、高 33；
+        // 被降级是 y 为负、或高度远小于菜单栏高度。
+        //
+        // 这里隔几秒复查一次，发现位置不对就**销毁重建**整个 statusItem，
+        // 让系统重新分配一次位置。重建是 App 内部行为，不依赖系统侧清缓存，
+        // 因此比"换个 bundle id"更彻底 —— 后者只解决一次性事故，前者解决复发。
+        for delay in [2.0, 8.0, 20.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.ensureStatusItemPlacement()
+            }
+        }
 
         let ticker = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
             // 显式收池：每分钟触发一次、且内部会产出大量临时对象
@@ -186,6 +231,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Diagnostics.record(statusItem: self.statusItem, snapshot: self.snapshot, menu: self.menu)
             }
         }
+    }
+
+    // MARK: - 状态栏项的创建与位置自愈
+
+    /// 创建状态栏项，并套上按钮的样式设置。
+    ///
+    /// 拆成独立方法，是为了位置自愈时能整体重建 ——
+    /// 重建只重做"状态栏项 + 按钮样式"这一层，
+    /// 菜单内容（buildMenuOnce 的成果）不重复建，避免内存白白涨。
+    private func createStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        guard let button = statusItem.button else { return }
+        // 数值在左、图标在右。菜单栏控件从左往右排，靠右的位置更容易被别的图标挤掉，
+        // 把读数放在最左侧可以保证它始终第一个被看到。
+        button.imagePosition = .imageTrailing
+        button.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        button.setAccessibilityLabel("Codex 用量")
+    }
+
+    /// 检查状态栏项在菜单栏里的位置是否正常，不正常就重建。
+    ///
+    /// ## 判据为什么是"看 frame"而不是"看 isVisible"
+    ///
+    /// `isVisible` 在这个问题上完全无效：被降级时它照样报 true，
+    /// 因为按钮窗口确实存在、也确实被创建了，只是**没被放进菜单栏的排布里**。
+    /// 能区分的只有它的几何位置：
+    ///
+    /// - 正常：y ≈ 923（菜单栏底部），高度 ≈ 33（撑满菜单栏）
+    /// - 被降级：y 为负（悬在屏幕顶边之外），或高度只有 22（退化成图标高度）
+    ///
+    /// 高度这一项尤其关键：菜单栏满高是 32pt（safeAreaInsets.top = 32），
+    /// 正常项连边框算 33；被降级的项只有 22 —— 差 11pt，肉眼在菜单栏上一眼能看出来。
+    private func ensureStatusItemPlacement() {
+        guard let button = statusItem.button, let window = button.window else { return }
+        let frame = window.frame
+
+        let screen = NSScreen.screens.first
+        let menuBarHeight = screen?.safeAreaInsets.top ?? 32
+        // 菜单栏那条带：贴着屏幕顶端，厚度 = menuBarHeight。
+        // 坐标原点在左下角，所以这条带是 [屏幕高 − menuBarHeight, 屏幕高]。
+        let screenTop = screen?.frame.maxY ?? 0
+        let menuBarBottom = screenTop - menuBarHeight
+        let expectedHeight = menuBarHeight + 1
+
+        // 主判据：高度撑满菜单栏。
+        // 高度这一项最稳定 —— 菜单栏满高由系统定（32pt + 1pt 边框 = 33），
+        // 被降级的项只有 22（退化成图标高度），差 11pt。
+        //
+        // 辅助判据：高度对，但位置悬在菜单栏那条带之外。
+        // 用相对判据，不写死具体坐标 —— 换机器、换缩放都还成立。
+        let heightOK = frame.height >= expectedHeight - 2
+        let positionOK = frame.minY <= menuBarBottom + menuBarHeight + 2
+            && frame.minY >= menuBarBottom - 2
+        let looksNormal = heightOK && positionOK
+
+        if looksNormal { return }
+
+        Diagnostics.appendRaw("""
+            [\(Diagnostics.logStamp)] 状态栏位置异常（frame=\(frame)，\
+            期望高度≈\(expectedHeight)）→ 重建状态栏项以重新分配位置\n
+            """)
+
+        // 重建：先摘掉旧的（含菜单），再整体建一个新的。
+        statusItem.menu = nil
+        statusItem = nil
+        createStatusItem()
+        statusItem.menu = menu
+
+        // 重建后图标和读数要立刻重画一次，否则会空着直到下一个刷新周期。
+        lastIconSignature = nil
+        reload(forceIcon: true)
     }
 
     // MARK: - 取数并更新状态栏
@@ -463,6 +579,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
               <true/>
               <key>ProcessType</key>
               <string>Interactive</string>
+              <!--
+              状态栏图标要挂在有窗口服务器的登录会话里才会显示。
+              缺这一项时，进程可能在后台会话启动 —— 进程活着、定时器在跑、
+              日志正常写，但菜单栏上一个图标都没有。
+              -->
+              <key>LimitLoadToSessionType</key>
+              <string>Aqua</string>
             </dict>
             </plist>
             """

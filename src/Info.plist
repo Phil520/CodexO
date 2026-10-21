@@ -11,7 +11,7 @@
 	<key>CFBundleIconFile</key>
 	<string>CodexO</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.bean.codex-usage-menubar</string>
+	<string>com.bean.codexo.menubar</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -19,9 +19,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.4</string>
+	<string>1.0.5</string>
 	<key>CFBundleVersion</key>
-	<string>5</string>
+	<string>6</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>LSUIElement</key>
@@ -29,6 +29,6 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>CodexO v1.0.2 · 只读 ~/.codex/sessions，不修改任何数据</string>
+	<string>CodexO v1.0.5 · 只读 ~/.codex/sessions，不修改任何数据</string>
 </dict>
 </plist>
