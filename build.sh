@@ -20,6 +20,7 @@ swiftc -swift-version 5 -O -framework Cocoa \
   -o "$TARGET_APP/Contents/MacOS/$BIN_NAME" \
   "$PROJECT_DIR/src/main.swift" \
   "$PROJECT_DIR/src/UsageReader.swift" \
+  "$PROJECT_DIR/src/LiveUsage.swift" \
   "$PROJECT_DIR/src/MenuBarUI.swift" \
   "$PROJECT_DIR/src/Diagnostics.swift" \
   "$PROJECT_DIR/src/Soak.swift"
@@ -36,6 +37,7 @@ if swiftc -swift-version 5 -O -framework Cocoa \
      "$PROJECT_DIR/tools/make_icon.swift" \
      "$PROJECT_DIR/src/MenuBarUI.swift" \
      "$PROJECT_DIR/src/UsageReader.swift" \
+     "$PROJECT_DIR/src/LiveUsage.swift" \
      "$PROJECT_DIR/src/Diagnostics.swift" \
      "$PROJECT_DIR/src/Soak.swift" \
   && "$ICON_TMP/make_icon" "$ICON_TMP/CodexO.iconset" >/dev/null \
@@ -126,7 +128,8 @@ echo "  [1/5] 月相档位设计（面积单调 + 相邻差 + 胖瘦）"
 swiftc -swift-version 5 -framework Cocoa -o "$TEST_TMP/levels" \
   "$MOON_LEVELS_SRC/main.swift" \
   "$PROJECT_DIR/src/MenuBarUI.swift" \
-  "$PROJECT_DIR/src/UsageReader.swift"
+  "$PROJECT_DIR/src/UsageReader.swift" \
+  "$PROJECT_DIR/src/LiveUsage.swift" \
 > "$TEST_TMP/build.log" 2>&1
   if [ $? -ne 0 ]; then
     echo "    编译失败，完整输出："
@@ -139,7 +142,8 @@ echo "  [2/5] 月相几何（渲染出来的是不是这个形状）"
 swiftc -swift-version 5 -framework Cocoa -o "$TEST_TMP/moon" \
   "$MOON_GEOM_SRC/main.swift" \
   "$PROJECT_DIR/src/MenuBarUI.swift" \
-  "$PROJECT_DIR/src/UsageReader.swift"
+  "$PROJECT_DIR/src/UsageReader.swift" \
+  "$PROJECT_DIR/src/LiveUsage.swift" \
 > "$TEST_TMP/build.log" 2>&1
   if [ $? -ne 0 ]; then
     echo "    编译失败，完整输出："
@@ -152,6 +156,7 @@ echo "  [3/5] 取数与缓存"
 swiftc -swift-version 5 -framework Cocoa -o "$TEST_TMP/reader" \
   "$PROJECT_DIR/tests/main.swift" \
   "$PROJECT_DIR/src/UsageReader.swift" \
+  "$PROJECT_DIR/src/LiveUsage.swift" \
   "$PROJECT_DIR/src/MenuBarUI.swift"
 > "$TEST_TMP/build.log" 2>&1
   if [ $? -ne 0 ]; then
@@ -167,6 +172,7 @@ swiftc -swift-version 5 -framework Cocoa -D CODEXO_SINGLE_INSTANCE_TESTS \
   "$PROJECT_DIR/tests/main.swift" \
   "$PROJECT_DIR/tests/single_instance.swift" \
   "$PROJECT_DIR/src/UsageReader.swift" \
+  "$PROJECT_DIR/src/LiveUsage.swift" \
   "$PROJECT_DIR/src/MenuBarUI.swift"
 > "$TEST_TMP/build.log" 2>&1
   if [ $? -ne 0 ]; then
@@ -190,7 +196,7 @@ swiftc -swift-version 5 -framework Cocoa -o "$TEST_TMP/placement" \
     exit 1
   fi
 CODEXO_BINARY="$TARGET_APP/Contents/MacOS/CodexUsageMenuBar" "$TEST_TMP/placement" \
-  | grep -E "^(✅|❌|  )"
+  | grep -E "^(✅|❌|⏭|  )"
 
 # 收尾铁律：先杀进程、确认干净，再删目录。
 # 顺序反了会留下孤儿进程——菜单栏于是出现两个图标（本项目 2026-10-19 踩过）。

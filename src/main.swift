@@ -179,10 +179,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
+        // 启动后立刻在后台向 Codex 官方接口要一次实时额度。
+        //
+        // 本地会话日志只在 Codex 真正发请求时才写额度，不开 Codex 就会停更，
+        // 那时旧读数的窗口都过了期，会被推算成「剩余 100%」——
+        // 2026-11-12 用户报的「怎么不准了」就是这么来的。
+        //
+        // 走后台队列，主线程不等它：拿得到就重画一次，拿不到就用本地文件兜底。
+        LiveUsage.refreshInBackground { [weak self] in
+            self?.reload(forceIcon: true)
+        }
+
         let ticker = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
             // 显式收池：每分钟触发一次、且内部会产出大量临时对象
             autoreleasepool {
+                // 先按现有数据刷一次界面，再顺手让实时接口在后台更新。
+                // 顺序不能反：先等网络的话，网络不好时界面上会一直停着不动。
                 self?.reload()
+                LiveUsage.refreshInBackground { [weak self] in
+                    self?.reload()
+                }
                 if Soak.forceIconOnTick { Soak.forcedIconRender() }
             }
         }
@@ -268,12 +284,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let frame = window.frame
 
         let screen = NSScreen.screens.first
-        let menuBarHeight = screen?.safeAreaInsets.top ?? 32
+
+        // 菜单栏高度：不能只信 safeAreaInsets.top。
+        //
+        // 2026-11-12 踩到：进程没有图形会话（锁屏、刚唤醒、或从命令行启动）时，
+        // `safeAreaInsets.top` 会返回 **0**。此时「正常项应有 33 高」被算成「应有 1 高」，
+        // 于是一个完全正常的项被判成异常，接着被销毁重建 —— 反复几次就把图标搞没了。
+        // 判据太脆，会把自愈本身变成故障源。
+        //
+        // 兜底用 `frame.maxY − visibleFrame.maxY`：系统真实留给菜单栏的高度
+        // （956 − 923 = 33，含那 1pt 边框）。不依赖 safeAreaInsets。
+        let insetsTop = screen?.safeAreaInsets.top ?? 0
+        let visibleGap = (screen?.frame.maxY ?? 0) - (screen?.visibleFrame.maxY ?? 0)
+        let menuBarHeight: CGFloat = insetsTop > 0 ? insetsTop : max(0, visibleGap - 1)
         // 菜单栏那条带：贴着屏幕顶端，厚度 = menuBarHeight。
         // 坐标原点在左下角，所以这条带是 [屏幕高 − menuBarHeight, 屏幕高]。
         let screenTop = screen?.frame.maxY ?? 0
         let menuBarBottom = screenTop - menuBarHeight
         let expectedHeight = menuBarHeight + 1
+
+        // 拿不到有效的菜单栏几何（锁屏、刚唤醒、没有图形会话）就**不做判断**。
+        //
+        // 这几项同时为 0，说明这个进程此刻读不到屏幕布局，而不是「布局错了」。
+        // 此时若继续按判据计算，任何正常项都会被算成异常，
+        // 接着就是销毁重建 —— 自愈动作反而把好状态弄坏。
+        // **没有信息的时候，最安全的动作是什么都不做。**
+        guard menuBarHeight > 0, screenTop > 0 else { return }
 
         // 主判据：高度撑满菜单栏。
         // 高度这一项最稳定 —— 菜单栏满高由系统定（32pt + 1pt 边框 = 33），

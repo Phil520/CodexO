@@ -18,6 +18,16 @@ struct UsageSnapshot {
     let loadedAt: Date
     let error: String?
 
+    /// 数据是否来自 Codex 官方实时接口。
+    ///
+    /// 用来在界面上把两种来源分开：
+    ///   · `true`  → 数字就是此刻的额度
+    ///   · `false` → 来自本地会话日志，可能是几分钟甚至几小时前的
+    ///
+    /// 这一点很重要。2026-11-12 出的「怎么不准了」，起因就是界面把一份
+    /// 停更三个半小时的本地读数当成实时值展示，还因为窗口过期推算成了 100%。
+    var isLive: Bool = false
+
     var hasData: Bool { fiveHour != nil || weekly != nil }
 
     /// 无数据时的说明文字
@@ -77,6 +87,9 @@ enum UsageReader {
     /// 「我怀疑你错了，去看看」——此时再拿缓存糊弄他，就是把用户的质疑当噪声。
     static func invalidateCache() {
         cache = nil
+        // 实时接口那边也有缓存，手动刷新同样要绕过它，
+        // 否则用户点了刷新、数字还不动，等于又踩一遍上面那个坑。
+        LiveUsage.refreshInBackground(force: true)
     }
 
     /// 时间戳格式化器建一次即可（热点路径上每次新建属于无谓的分配）
@@ -102,6 +115,17 @@ enum UsageReader {
     private static func performLoad() -> UsageSnapshot {
         let now = Date()
         let fm = FileManager.default
+
+        // 0. 优先用官方实时接口的读数（后台线程拿到的，这里只取缓存，不等网络）
+        //
+        // 为什么排在最前：本地会话日志只在 Codex 真的发出请求时才写，
+        // 一旦没在跑 Codex，日志会停更几个小时，而那时窗口早已过期，
+        // 按「已重置」推算就会显示成 100% —— 2026-11-12 用户报的「不准」就是这个。
+        //
+        // 取不到（没登录 / 网络不通 / 结构变化）就往下走本地文件，行为与以前完全一致。
+        if let live = LiveUsage.cachedSnapshot(now: now) {
+            return live
+        }
 
         guard fm.fileExists(atPath: sessionRoot) else {
             return blank(at: now, error: "没有找到 Codex 会话目录 ~/.codex/sessions")
